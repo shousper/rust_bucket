@@ -1,0 +1,10 @@
+[package]
+name = "rust_bucket"
+version = "0.1.0"
+authors = ["Corey McGregor <dormant.aura@gmail.com>"]
+
+[dependencies]
+yobot = "0.1.1"
+regex = "0.2.2"
+slack = "0.18.0"
+rand = "0.5.0"

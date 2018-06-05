@@ -344,19 +344,22 @@ const RESPONSES: &'static [&str] = &[
     "non-discriminatory"
 ];
 
-pub struct CoreyHotline;
+struct CoreyHotline;
+
+pub fn new_corey_hotline() -> impl Handler {
+    CoreyHotline {}
+}
 
 impl CoreyHotline {
-    pub fn new() -> CoreyHotline {
-        CoreyHotline {}
-    }
-
     fn random_response(&self) -> String {
         thread_rng().choose(&RESPONSES).unwrap().to_string()
     }
 }
 
 impl Handler for CoreyHotline {
+    fn name(&self) -> String {
+        return String::from("CoreyHotline")
+    }
     fn can_handle(&self, command: String) -> bool {
         return command == "corey"
     }

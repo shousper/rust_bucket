@@ -1,66 +1,27 @@
 use regex::Regex;
-use slack::{Channel, Event, EventHandler, Message, RtmClient};
+use slack::{Event, EventHandler, Message, RtmClient};
 use api;
-use api::Handler;
-use std::collections::HashMap;
+use api::{Bot, Handler};
 
-pub struct Bot {
-    name: String,
+pub fn new_slackbot(token: String, trigger: Regex) -> impl Bot {
+    SlackBot {
+        token,
+        trigger,
+        handlers: Vec::new(),
+
+        started: false,
+    }
+}
+
+struct SlackBot {
     token: String,
     trigger: Regex,
     handlers: Vec<Box<Handler>>,
 
-    _started: bool,
-    _channels: HashMap<String, Channel>
+    started: bool,
 }
 
-#[allow(dead_code)]
-impl Bot {
-    pub fn new(name: String, token: String, trigger: Regex) -> Bot {
-        Bot {
-            name,
-            token,
-            trigger,
-            handlers: Vec::new(),
-
-            _started: false,
-            _channels: HashMap::new()
-        }
-    }
-
-    pub fn add_handler<T>(&mut self, handler: T) where T: Handler + 'static {
-        if self._started {
-            panic!("cannot add handler to started bot!");
-        }
-
-        self.handlers.push(Box::new(handler));
-    }
-
-    pub fn start(&mut self) {
-        if self._started {
-            panic!("cannot start bot, already started!");
-        }
-        self._started = true;
-        match RtmClient::login(&self.token) {
-            Err(err) => panic!("Error: {}", err),
-            Ok(client) => {
-                match client.start_response().channels.as_ref() {
-                    Some(channels) => {
-                        channels.iter().for_each(|channel| {
-                            println!("Loaded channel: {}", channel.to_owned().name.unwrap());
-                            self._channels.insert(channel.to_owned().id.unwrap(), channel.to_owned());
-                        });
-                    },
-                    None => panic!("unable to load channels")
-                };
-
-                if let Err(err) = client.run(self) {
-                    panic!("Error: {}", err);
-                }
-            }
-        };
-    }
-
+impl SlackBot {
     fn parse_message(&self, raw: &str) -> (Option<String>, Vec<String>) {
         let mut command: Option<String> = None;
         let mut arguments: Vec<String> = Vec::new();
@@ -77,53 +38,111 @@ impl Bot {
     }
 }
 
-impl EventHandler for Bot {
+impl Bot for SlackBot {
+    fn add_handler<T>(&mut self, handler: T) where T: Handler + 'static {
+        if self.started {
+            panic!("cannot add handler to started bot!");
+        }
+
+        debug!("Added handler {}", handler.name());
+        self.handlers.push(Box::new(handler));
+    }
+
+    fn start(&mut self) {
+        info!("Starting..");
+        if self.started {
+            panic!("cannot start bot, already started!");
+        }
+        self.started = true;
+        match RtmClient::login(&self.token) {
+            Err(err) => panic!("Error: {}", err),
+            Ok(client) => {
+
+                // Discover slf
+                if let Some(slf) = client.start_response().slf.to_owned() {
+                    info!("Discovered slf: {}", slf.name.unwrap_or(String::new()));
+                }
+
+                // Discover users
+                if let Some(users) = client.start_response().users.as_ref() {
+                    for v in users.to_owned().into_iter() {
+                        info!("Discovered user: {}", v.name.unwrap_or(String::new()));
+                    }
+                }
+
+                // Discover mpims
+                if let Some(mpims) = client.start_response().mpims.as_ref() {
+                    for v in mpims.to_owned().into_iter() {
+                        info!("Discovered mpim: {}", v.name.unwrap_or(String::new()));
+                    }
+                }
+
+                // Discover channels
+                if let Some(channels) = client.start_response().channels.as_ref() {
+                    for v in channels.to_owned().into_iter() {
+                        info!("Discovered channel: {}", v.name.unwrap_or(String::new()));
+                    }
+                }
+
+                // Discover groups
+                if let Some(groups) = client.start_response().groups.as_ref() {
+                    for v in groups.to_owned().into_iter() {
+                        info!("Discovered group: {}", v.name.unwrap_or(String::new()));
+                    }
+                }
+
+                info!("Started.");
+                if let Err(err) = client.run(self) {
+                    panic!("Error: {}", err);
+                }
+            }
+        };
+    }
+}
+
+impl EventHandler for SlackBot {
     fn on_event(&mut self, cli: &RtmClient, event: Event) {
         match event {
             Event::Message(box_message) => {
                 match *box_message {
                     Message::Standard(msg) => {
-                        let text = msg.text.unwrap_or("".to_owned());
+                        let original = msg.to_owned();
+
+                        let channel_id = msg.channel.unwrap_or(String::new());
+                        let text = msg.text.unwrap_or(String::new());
+
                         let (command, arguments) = self.parse_message(&text);
-                        let channel_id = msg.channel.unwrap_or("".to_owned());
 
-                        let channel = self._channels.get(channel_id.as_str());
-                        let channel_name = channel
-                            .and_then(|c| c.to_owned().name)
-                            .unwrap_or_else(|| String::from("<unknown>"));
+                        if let Some(c) = command {
+                            info!("[{}] command: {}, arguments: {:?}", channel_id, c, arguments);
 
-                        match command {
-                            Some(c) => {
-                                println!("[{}@{}] command: {}, arguments: {:?}", self.name, channel_name, c, arguments);
+                            let message = api::Message {
+                                channel_id,
+                                arguments: arguments.to_owned()
+                            };
 
-                                let message = api::Message {
-                                    channel_id,
-                                    channel: channel.map(|c| c.clone()),
-                                    arguments: arguments.clone()
-                                };
-
-                                for handler in self.handlers.iter_mut() {
-                                    if handler.can_handle(c.to_owned()) {
-                                        handler.handle(cli, message.clone());
-                                    }
+                            for handler in self.handlers.iter_mut() {
+                                if handler.can_handle(c.to_owned()) {
+                                    handler.handle(cli, message.to_owned());
                                 }
-                            },
-                            _ => {}
-                        };
+                            }
+                        } else {
+                            info!("msg: {:#?}", original)
+                        }
                     },
-                    _ => {}
+                    _ => info!("message: {:#?}", *box_message)
                 }
             },
-            _ => {}
+            _ => info!("event: {:#?}", event)
         }
     }
 
     fn on_close(&mut self, _cli: &RtmClient) {
-        println!("RTM API disconnected")
+        info!("Disconnected")
     }
 
     fn on_connect(&mut self, _cli: &RtmClient) {
-        println!("RTM API connected")
+        info!("Connected")
     }
 }
 

@@ -1,8 +1,4 @@
-use api::{Handler, Message};
-use slack::{RtmClient};
-use rand::{thread_rng, Rng};
-
-const RESPONSES: &'static [&str] = &[
+pub const RESPONSES: &'static [&str] = &[
     "Hi, you’ve reached the Corey hot-line.",
     "$4.95 a minute",
     "These are some words that rhyme with Corey: Gory. Story. Allegory. Montessori.",
@@ -341,30 +337,5 @@ const RESPONSES: &'static [&str] = &[
     "investigatory",
     "pacificatory",
     "participatory",
-    "non-discriminatory"
+    "non-discriminatory",
 ];
-
-struct CoreyHotline;
-
-pub fn new_corey_hotline() -> impl Handler {
-    CoreyHotline {}
-}
-
-impl CoreyHotline {
-    fn random_response(&self) -> String {
-        thread_rng().choose(&RESPONSES).unwrap().to_string()
-    }
-}
-
-impl Handler for CoreyHotline {
-    fn name(&self) -> String {
-        return String::from("CoreyHotline")
-    }
-    fn can_handle(&self, command: String) -> bool {
-        return command == "corey"
-    }
-    fn handle(&mut self, cli: &RtmClient, message: Message) {
-        let response = self.random_response();
-        let _ = cli.sender().send_message(message.channel_id.as_str(), response.as_str());
-    }
-}

@@ -5,6 +5,7 @@ pub trait Bot {
 
 #[derive(Debug)]
 pub enum PluginError {
+    AlreadyLoaded,
     InvalidLibrary,
     InvalidPluginConstructor
 }

@@ -4,9 +4,8 @@ extern crate log;
 extern crate env_logger;
 extern crate rand;
 
-use api::{InboundMessage, OutboundMessage, Plugin, State};
+use api::{HandleError, HandleResult, InboundMessage, OutboundMessage, Plugin, State};
 use rand::{thread_rng, Rng};
-use std::sync::Arc;
 
 mod data;
 
@@ -18,6 +17,7 @@ struct CoreyHotlinePlugin {
 #[no_mangle]
 pub extern "C" fn new_plugin() -> *const (Plugin + 'static) {
     env_logger::init();
+    debug!("Loaded!");
     Box::into_raw(Box::new(CoreyHotlinePlugin { count: 0 }))
 }
 
@@ -39,11 +39,11 @@ impl Plugin for CoreyHotlinePlugin {
     fn name(&self) -> &'static str {
         "CoreyHotline"
     }
-    fn handle(&mut self, _state: &Arc<State>, message: &InboundMessage) -> Result<Vec<OutboundMessage>, String> {
+    fn handle(&mut self, _state: &State, message: &InboundMessage) -> HandleResult {
         info!("Received {} command", message.command);
         match message.command.as_str() {
             "corey" => Ok(self.command_corey(message)),
-            _ => Ok(vec![]),
+            _ => Err(HandleError::Unhandled),
         }
     }
 }

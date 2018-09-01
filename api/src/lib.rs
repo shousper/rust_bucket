@@ -1,17 +1,17 @@
 use std::any::Any;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::fmt::Debug;
 
 /// A plugin which allows you to add extra functionality to the bot.
 pub trait Plugin: Any + Send + Sync {
     /// Get a name describing the `Plugin`.
     fn name(&self) -> &'static str;
     /// Handle inbound message
-    fn handle(&mut self, state: &Arc<State>, message: &InboundMessage) -> Result<Vec<OutboundMessage>, String>;
+    fn handle(&mut self, state: &State, message: &InboundMessage) -> HandleResult;
 }
 
-pub trait State: Any + Send + Sync {
-    fn me(&self) -> Vec<User>;
+pub trait State: Any + Send + Sync + Debug {
+    fn me(&self) -> Option<User>;
     fn users(&self) -> Vec<User>;
     fn rooms(&self) -> Vec<Room>;
 }
@@ -22,6 +22,8 @@ pub struct InboundMessage {
     pub command: String,
     pub arguments: Vec<String>,
 }
+
+pub type HandleResult = Result<Vec<OutboundMessage>, HandleError>;
 
 #[derive(Clone, Debug)]
 pub struct OutboundMessage {
@@ -48,4 +50,10 @@ pub struct Room {
     pub id: String,
     pub name: String,
     pub attributes: HashMap<String, String>,
+}
+
+#[derive(Clone, Debug)]
+pub enum HandleError {
+    Unhandled,
+    Unexpected(String)
 }

@@ -4,7 +4,10 @@ use lib::{Library};
 use regex::Regex;
 use slack::{Event, EventHandler, Message, RtmClient};
 use std::collections::HashMap;
-use std::sync::Arc;
+use api::OutboundMessage;
+use api::HandleError;
+use api::HandleResult;
+use std::env;
 
 type PluginCreate = unsafe fn() -> *mut Plugin;
 
@@ -13,27 +16,42 @@ pub fn create(token: String, trigger: Regex) -> impl Bot {
         token,
         trigger,
 
-        libs: Vec::new(),
+        libs: HashMap::new(),
         plugins: Vec::new(),
 
-        state: Arc::new(SlackState {}),
+        state: SlackState::new(),
         started: false,
     }
 }
 
-struct SlackState;
+#[derive(Clone, Debug)]
+struct SlackState {
+    me: Option<User>,
+    users: Vec<User>,
+    rooms: Vec<Room>,
+}
+
+impl SlackState {
+    fn new() -> Self {
+        SlackState {
+            me: None,
+            users: Vec::new(),
+            rooms: Vec::new(),
+        }
+    }
+}
 
 impl State for SlackState {
-    fn me(&self) -> Vec<User> {
-        unimplemented!()
+    fn me(&self) -> Option<User> {
+        self.me.clone()
     }
 
     fn users(&self) -> Vec<User> {
-        unimplemented!()
+        self.users.clone()
     }
 
     fn rooms(&self) -> Vec<Room> {
-        unimplemented!()
+        self.rooms.clone()
     }
 }
 
@@ -41,16 +59,15 @@ struct SlackBot {
     token: String,
     trigger: Regex,
 
-    libs: Vec<Library>,
+    libs: HashMap<String, Library>,
     plugins: Vec<Box<Plugin>>,
 
-    state: Arc<State>,
+    state: SlackState,
     started: bool,
 }
 
 impl SlackBot {
     unsafe fn load_plugin(&mut self, lib: &Library) -> Result<(), PluginError> {
-        info!("Loading plugin from {:?}", lib);
         match lib.get::<PluginCreate>(b"new_plugin") {
             Ok(constructor) => {
                 // Construct plugin
@@ -84,23 +101,84 @@ impl SlackBot {
             arguments,
         };
 
+        match self.core_commands(&message.clone()) {
+            Ok(outbound_messages) => {
+                SlackBot::send_responses(cli, outbound_messages);
+                return;
+            },
+            Err(err) => {
+                match err {
+                    HandleError::Unhandled => {},
+                    _ => {
+                        error!("Failed to handle message: {:?}", err);
+                        SlackBot::send_responses(cli, vec![
+                            OutboundMessage {
+                                destination: message.source.clone(),
+                                content: format!("Whoops! {:?}", err),
+                            }
+                        ])
+                    }
+                }
+            }
+        }
+
         for mut plugin in self.plugins.iter_mut() {
             info!("Trying {:?} first!", plugin.name());
             match plugin.handle(&self.state.clone(), &message.clone()) {
                 Ok(outbound_messages) => {
                     info!("Plugin {} responded with {} messages", plugin.name(), outbound_messages.len());
-                    for msg in outbound_messages {
-                        match msg.destination {
-                            Source::Room(room) => {
-                                if let Err(e) = cli.sender().send_message(room.id.as_str(), msg.content.as_str()) {
-                                    error!("Unable to send message {} to {}: {:?}", msg.content, room.id, e);
+                    SlackBot::send_responses(cli, outbound_messages);
+                },
+                Err(err) => {
+                    match err {
+                        HandleError::Unhandled => {},
+                        _ => {
+                            error!("Failed to handle message: {:?}", err);
+                            SlackBot::send_responses(cli, vec![
+                                OutboundMessage {
+                                    destination: message.source.clone(),
+                                    content: format!("Whoops! {:?}", err),
                                 }
-                            },
-                            _ => {}
+                            ])
                         }
                     }
+                }
+            }
+        }
+    }
+
+    fn core_commands(&mut self, message: &InboundMessage) -> HandleResult {
+        match message.command.as_str() {
+            "version" => Ok(vec![
+                OutboundMessage {
+                    destination: message.source.clone(),
+                    content: "I am version 1.0".to_string(),
+                }
+            ]),
+            "load" => unsafe {
+                match self.plugin(message.arguments[0].as_str()) {
+                    Ok(_) => Ok(vec![
+                        OutboundMessage {
+                            destination: message.source.clone(),
+                            content: format!("Loaded {}", message.arguments[0]),
+                        }
+                    ]),
+                    Err(e) => Err(HandleError::Unexpected(format!("{:?}", e))),
+                }
+            }
+            _ => Err(HandleError::Unhandled),
+        }
+    }
+
+    fn send_responses(cli: &RtmClient, msgs: Vec<OutboundMessage>) {
+        for msg in msgs {
+            match msg.destination {
+                Source::Room(room) => {
+                    if let Err(e) = cli.sender().send_message(room.id.as_str(), msg.content.as_str()) {
+                        error!("Unable to send message {} to {}: {:?}", msg.content, room.id, e);
+                    }
                 },
-                Err(error) => error!("Handling message: {:?}", error)
+                _ => {}
             }
         }
     }
@@ -125,12 +203,24 @@ impl SlackBot {
 }
 
 impl Bot for SlackBot {
-    unsafe fn plugin(&mut self, filename: &str) -> Result<(), PluginError> {
-        info!("Loading library");
-        match Library::new(filename) {
+    unsafe fn plugin(&mut self, name: &str) -> Result<(), PluginError> {
+        debug!("Loading {} plugin", name);
+        if self.libs.contains_key(&name.to_string()) {
+            debug!("Plugin {} already loaded", name);
+            return Err(PluginError::AlreadyLoaded);
+        }
+
+        let base_path = env::current_exe().unwrap().parent().unwrap().to_path_buf();
+        let mut path_buf = base_path.clone();
+        path_buf.push(format!("lib{}.dylib", name));
+        let plugin_path = path_buf.to_str().unwrap();
+
+        debug!("Loading {} plugin from {}", name, plugin_path);
+        match Library::new(plugin_path) {
             Ok(lib) => {
                 self.load_plugin(&lib)?;
-                self.libs.push(lib);
+                self.libs.insert(name.to_string(), lib);
+                info!("Loaded {} plugin", name);
                 Ok(())
             },
             Err(e) => {
@@ -147,44 +237,61 @@ impl Bot for SlackBot {
         }
         self.started = true;
 
-        info!("With {} plugins..", self.plugins.len());
-        for p in self.plugins.iter() {
-            info!("> Plugin: {}", p.name());
-        }
-
         match RtmClient::login(&self.token) {
             Err(err) => panic!("Error: {}", err),
             Ok(client) => {
                 // Discover slf
                 if let Some(slf) = client.start_response().slf.to_owned() {
-                    info!("Discovered slf: {}", slf.name.unwrap_or(String::new()));
+                    self.state.me = Some(User {
+                        id: slf.id.unwrap_or_else(String::new),
+                        username: slf.name.unwrap_or_else(String::new),
+                        name: slf.real_name.unwrap_or_else(String::new),
+                        attributes: HashMap::new(),
+                    });
                 }
 
                 // Discover users
                 if let Some(users) = client.start_response().users.as_ref() {
-                    for v in users.to_owned().into_iter() {
-                        info!("Discovered user: {}", v.name.unwrap_or(String::new()));
+                    for u in users.to_owned().into_iter() {
+                        self.state.users.push(User {
+                            id: u.id.unwrap_or_else(String::new),
+                            username: u.name.unwrap_or_else(String::new),
+                            name: u.real_name.unwrap_or_else(String::new),
+                            attributes: HashMap::new(),
+                        });
                     }
                 }
 
                 // Discover mpims
                 if let Some(mpims) = client.start_response().mpims.as_ref() {
-                    for v in mpims.to_owned().into_iter() {
-                        info!("Discovered mpim: {}", v.name.unwrap_or(String::new()));
+                    for r in mpims.to_owned().into_iter() {
+                        self.state.rooms.push(Room {
+                            id: r.id.unwrap_or_else(String::new),
+                            name: r.name.unwrap_or_else(String::new),
+                            attributes: [(String::from("type"), String::from("mpim"))].iter().cloned().collect(),
+                        });
                     }
                 }
 
                 // Discover channels
                 if let Some(channels) = client.start_response().channels.as_ref() {
-                    for v in channels.to_owned().into_iter() {
-                        info!("Discovered channel: {}", v.name.unwrap_or(String::new()));
+                    for r in channels.to_owned().into_iter() {
+                        self.state.rooms.push(Room {
+                            id: r.id.unwrap_or_else(String::new),
+                            name: r.name.unwrap_or_else(String::new),
+                            attributes: [(String::from("type"), String::from("channel"))].iter().cloned().collect(),
+                        });
                     }
                 }
 
                 // Discover groups
                 if let Some(groups) = client.start_response().groups.as_ref() {
-                    for v in groups.to_owned().into_iter() {
-                        info!("Discovered group: {}", v.name.unwrap_or(String::new()));
+                    for r in groups.to_owned().into_iter() {
+                        self.state.rooms.push(Room {
+                            id: r.id.unwrap_or_else(String::new),
+                            name: r.name.unwrap_or_else(String::new),
+                            attributes: [(String::from("type"), String::from("group"))].iter().cloned().collect(),
+                        });
                     }
                 }
 
